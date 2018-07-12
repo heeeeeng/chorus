@@ -212,7 +212,8 @@ func (conR *ConsensusReactor) Receive(chID byte, src *p2p.Peer, msgBytes []byte)
 		// TODO punish peer?
 		return
 	}
-
+	src.DumpLogger.Info(fmt.Sprintf("from: %s, chID: %x, msg: %v", src.NodeInfo.RemoteAddr, chID, msg))
+	
 	// Get peer states
 	ps := src.Data.Get(agtypes.PeerStateKey).(*PeerState)
 

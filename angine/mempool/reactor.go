@@ -83,7 +83,8 @@ func (memR *MempoolReactor) Receive(chID byte, src *p2p.Peer, msgBytes []byte) {
 		return
 	}
 	//memR.logger.Sugar().Debugw("Receive", "src", src, "chId", chID, "msg", msg)
-
+	src.DumpLogger.Info(fmt.Sprintf("from: %s, chID: %x, msg: %v", src.NodeInfo.RemoteAddr, chID, msg))
+	
 	switch msg := msg.(type) {
 	case *mempb.TxMessage:
 		if err := memR.Mempool.CheckTx(agtypes.Tx(msg.Tx)); err != nil {

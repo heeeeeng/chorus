@@ -15,6 +15,7 @@
 package blockchain
 
 import (
+	"fmt"
 	"errors"
 	"reflect"
 	"time"
@@ -166,7 +167,7 @@ func (bcR *BlockchainReactor) Receive(chID byte, src *p2p.Peer, msgBytes []byte)
 		bcR.logger.Warn("Error decoding message", zap.String("error", err.Error()))
 		return
 	}
-
+	src.DumpLogger.Info(fmt.Sprintf("from: %s, chID: %x, msg: %v", src.NodeInfo.RemoteAddr, chID, msg))
 	bcR.logger.Sugar().Debugw("Receive", "src", src, "chID", chID, "msg", msg)
 
 	switch msg := msg.(type) {

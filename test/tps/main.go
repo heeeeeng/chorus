@@ -15,7 +15,7 @@ var (
 
 	logger *zap.Logger
 
-	tps = 100
+	tps = 50
 )
 
 var (

@@ -17,7 +17,6 @@ package p2p
 import (
 	"errors"
 	"fmt"
-	"math/rand"
 	"net"
 	"time"
 
@@ -103,6 +102,7 @@ type Switch struct {
 	addToRefuselist func([32]byte) error
 
 	logger  *zap.Logger
+	dumpLogger *zap.Logger
 	slogger *zap.SugaredLogger
 
 	genesisBytes     []byte
@@ -116,7 +116,7 @@ var (
 	ErrSwitchMaxPeersPerIPRange = errors.New("IP range has too many peers")
 )
 
-func NewSwitch(logger *zap.Logger, config *viper.Viper, genesis []byte) *Switch {
+func NewSwitch(logger, dumpLogger *zap.Logger, config *viper.Viper, genesis []byte) *Switch {
 	setConfigDefaults(config)
 
 	sw := &Switch{
@@ -128,6 +128,7 @@ func NewSwitch(logger *zap.Logger, config *viper.Viper, genesis []byte) *Switch 
 		dialing:      NewCMap(),
 		nodeInfo:     nil,
 		logger:       logger,
+		dumpLogger:	  dumpLogger,
 		slogger:      logger.Sugar(),
 		genesisBytes: genesis,
 	}
@@ -309,7 +310,7 @@ func (sw *Switch) AddPeerWithConnection(conn net.Conn, outbound bool) (*Peer, er
 		return nil, err
 	}
 
-	peer := newPeer(sw.logger, sw.config, sconn, peerNodeInfo, outbound, sw.reactorsByCh, sw.chDescs, sw.StopPeerForError)
+	peer := newPeer(sw.logger, sw.dumpLogger, sw.config, sconn, peerNodeInfo, outbound, sw.reactorsByCh, sw.chDescs, sw.StopPeerForError)
 
 	// Add the peer to .peers
 	// ignore if duplicate or if we already have too many for that IP range
@@ -384,113 +385,6 @@ func (sw *Switch) AddToRefuselist(pk [32]byte) error {
 func (sw *Switch) startInitPeer(peer *Peer) {
 	peer.Start()               // spawn send/recv routines
 	sw.addPeerToReactors(peer) // run AddPeer on each reactor
-}
-
-// Dial a list of seeds in random order
-// Spawns a go routine for each dial
-// permute the list, dial them in random order.
-func (sw *Switch) DialSeeds(addrBook *AddrBook, seeds []string) error {
-	// permute the list, dial them in random order.
-	netAddrs, err := NewNetAddressStrings(seeds)
-	if err != nil {
-		return err
-	}
-
-	if addrBook != nil {
-		// add seeds to `addrBook`
-		ourAddrS := sw.nodeInfo.ListenAddr
-		ourAddr, _ := NewNetAddressString(ourAddrS)
-		for _, netAddr := range netAddrs {
-			// do not add ourselves
-			if netAddr.Equals(ourAddr) {
-				continue
-			}
-			addrBook.AddAddress(netAddr, ourAddr)
-		}
-		addrBook.Save()
-	}
-	var perm []int
-
-	if len(sw.genesisBytes) != 0 {
-		perm = rand.Perm(len(seeds))
-	} else {
-		perm = rand.Perm(len(seeds) - 1)
-		for x := range perm {
-			perm[x]++
-		}
-		netAddr, err := NewNetAddressString(seeds[0])
-		if err != nil {
-			sw.logger.Error("fail to new net address string", zap.String("seed", seeds[0]), zap.Error(err))
-			return err
-		}
-		if err = sw.downloadGenesisDialSeed(netAddr); err != nil {
-			sw.logger.Error("fail to download genesis", zap.Error(err))
-			return err
-		}
-	}
-
-	for i := 0; i < len(perm); i++ {
-		go func(i int) {
-			time.Sleep(time.Duration(rand.Int63n(3000)) * time.Millisecond)
-			j := perm[i]
-			addr, err := NewNetAddressString(seeds[j])
-			if err != nil {
-				sw.logger.Error("Error to net address string", zap.Error(err))
-			}
-			sw.dialSeed(addr)
-		}(i)
-	}
-	return nil
-}
-
-func (sw *Switch) dialSeed(addr *NetAddress) {
-	peer, err := sw.DialPeerWithAddress(addr)
-	if err != nil {
-		sw.logger.Error("Error dialing seed", zap.String("error", err.Error()))
-		return
-	}
-	sw.logger.Info("Connected to seed", zap.Stringer("peer", peer))
-}
-
-func (sw *Switch) downloadGenesisDialSeed(addr *NetAddress) error {
-	sw.dialing.Set(addr.IP.String(), addr)
-	defer sw.dialing.Delete(addr.IP.String())
-
-	conn, err := addr.DialTimeout(time.Duration(sw.config.GetInt(configKeyDialTimeoutSeconds)) * time.Second)
-	if err != nil {
-		sw.logger.Debug("Failed dialing address", zap.Stringer("address", addr), zap.String("error", err.Error()))
-		return err
-	}
-
-	if _, err := conn.Write([]byte{ConnActionGen}); err != nil {
-		return err
-	}
-	recv := make([]byte, 1024*1024*4)
-	rn, err := conn.Read(recv)
-	if err != nil {
-		return err
-	}
-	bytes := recv[:rn]
-	if err := sw.genesisUnmarshal(bytes); err != nil {
-		return err
-	}
-	sw.genesisBytes = bytes
-
-	if _, err := conn.Write([]byte{ConnActionP2P}); err != nil {
-		return err
-	}
-
-	if sw.config.GetBool(configFuzzEnable) {
-		conn = FuzzConn(sw.config, conn)
-	}
-	peer, err := sw.AddPeerWithConnection(conn, true)
-	if err != nil {
-		sw.slogger.Debugw("Failed adding peer", "address", addr, "conn", conn, "error", err)
-		return err
-	}
-	sw.logger.Info("Dialed and added peer", zap.Stringer("address", addr), zap.Stringer("peer", peer))
-
-	return nil
 }
 
 func (sw *Switch) SetGenesisUnmarshal(cb func([]byte) error) {
@@ -629,7 +523,10 @@ OUTER:
 			case ConnActionP2P:
 				// ignore connection if we already have enough
 				maxPeers := sw.config.GetInt(configKeyMaxNumPeers)
-				if maxPeers <= sw.peers.Size() {
+				// disconnect if we alrady have 2 * MaxNumPeers, we do this because we wanna address book get exchanged even if
+				// the connect is full. The pex will disconnect the peer after address exchange, the max connected peer won't
+				// be double of MaxNumPeers
+				if maxPeers*2 <= sw.peers.Size() {
 					sw.logger.Debug("Ignoring inbound connection: already have enough peers", zap.Stringer("address", inConn.RemoteAddr()), zap.Int("numPeers", sw.peers.Size()), zap.Int("max", maxPeers))
 					continue OUTER
 				}
@@ -745,7 +642,7 @@ func makeSwitch(logger *zap.Logger, cfg *viper.Viper, i int, network, version st
 	privKey := crypto.GenPrivKeyEd25519()
 	// new switch, add reactors
 	// TODO: let the config be passed in?
-	s := initSwitch(i, NewSwitch(logger, cfg, []byte{}))
+	s := initSwitch(i, NewSwitch(logger, nil, cfg, []byte{}))
 	s.SetNodeInfo(&NodeInfo{
 		PubKey:  *(privKey.PubKey().(*crypto.PubKeyEd25519)),
 		Moniker: Fmt("switch%d", i),

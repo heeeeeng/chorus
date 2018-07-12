@@ -103,6 +103,7 @@ func (pR *P2PReactor) Receive(chID byte, src *p2p.Peer, msgBytes []byte) {
 		// TODO punish peer?
 		return
 	}
+	src.DumpLogger.Info(fmt.Sprintf("from: %s, chID: %x, msg: %v", src.NodeInfo.RemoteAddr, chID, msg))
 
 	switch chID {
 	case CheckRequestChannel:
